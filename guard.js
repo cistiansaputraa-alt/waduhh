@@ -13,10 +13,7 @@ const CFG = {
   TOKEN_URL: 'https://raw.githubusercontent.com/cistiansaputraa-alt/ololo/main/token.json',
   KILL_URL: 'https://raw.githubusercontent.com/cistiansaputraa-alt/ololo/main/kill.txt',
   TOKEN_FALLBACK: path.join(__dirname, 'token.json'),
-  
-  // [VAULT] Secret buat ngecek HMAC Signature token.json
   HMAC_SECRET: Buffer.from('YTNmOWI3YzJlOGQxNDU2ZjBhOWIzYzdkMmU1ZjhhMWI0YzZkOWUyZjVhOGIxYzRkN2UwZjNhNmI5YzJkNWU4ZjE=', 'base64').toString('utf8'),
-
   HEARTBEAT_MS: 8000,
   DEBUG_DETECT_MS: 3000,
   KILL_CHECK_MS: 60000,
@@ -40,12 +37,8 @@ const exists = (p) => { try { return fs.existsSync(p); } catch { return false; }
 const mtime = (p) => { try { return fs.statSync(p).mtimeMs; } catch { return 0; } };
 
 const IS_DEV = process.env.LILY_DEV === '1';
-
-// ==========================================
-// [CAMOUFLAGED LOGS] Semua log jadi LILY-PARTY
-// ==========================================
-const log = (tag, msg) => { console.log(`[LILY-PARTY]`); };
-const err = (msg) => { console.log(`[LILY-PARTY]`); };
+const log = () => { console.log(`[LILY-PARTY]`); };
+const err = () => { console.log(`[LILY-PARTY]`); };
 
 const STATE = { booted: false, debugCount: 0, startedAt: Date.now(), lastStep: 'init', tamperEvents: [], killReason: null };
 
@@ -168,17 +161,12 @@ async function fetchValidTokens() {
   try {
     const raw = await pinnedFetch(CFG.TOKEN_URL);
     if (!raw) throw new Error('fetch fail');
-    
-    // [VAULT] Bongkar JSON & Cek HMAC
     const data = JSON.parse(raw);
     if (!Array.isArray(data.tokens) || typeof data.sig !== 'string') throw new Error('format');
     
-    // Hitung ulang signature
     const expected = crypto.createHmac('sha256', CFG.HMAC_SECRET).update(JSON.stringify(data.tokens)).digest('hex');
     const a = Buffer.from(expected, 'hex');
     const b = Buffer.from(data.sig, 'hex');
-    
-    // Kalau signature beda (berarti di-edit orang), langsung gagal
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) throw new Error('sig invalid');
 
     cachedTokens = data.tokens;
@@ -188,7 +176,6 @@ async function fetchValidTokens() {
     if (!buf) return [];
     try { 
       const d = JSON.parse(buf.toString('utf8')); 
-      // Cek HMAC juga buat fallback
       const expected = crypto.createHmac('sha256', CFG.HMAC_SECRET).update(JSON.stringify(d.tokens)).digest('hex');
       if (expected === d.sig) { cachedTokens = d.tokens || []; return cachedTokens; }
       return [];
@@ -199,15 +186,14 @@ async function fetchValidTokens() {
 async function validateTokenOrDie(botToken) {
   STATE.lastStep = 'validateToken';
   const valid = await fetchValidTokens();
-  // Timing safe compare
   let ok = false;
   const input = Buffer.from(botToken);
   for (const t of valid) {
     const b = Buffer.from(t);
     if (b.length === input.length && crypto.timingSafeEqual(b, input)) { ok = true; break; }
   }
-  if (!ok) { err(`Token tidak terdaftar!`); process.exit(1); }
-  log('✅', 'Token valid');
+  if (!ok) { err(); process.exit(1); }
+  log();
 }
 
 async function checkRemoteKill() {
@@ -260,34 +246,40 @@ function checkKillLoop() {
     const stat = fs.statSync(CFG.KILL_LOG);
     if (Date.now() - stat.mtimeMs < 3000) {
       const count = (fs.readFileSync(CFG.KILL_LOG, 'utf8').match(/KILL/g) || []).length;
-      if (count > 10 && !IS_DEV) { err('Terlalu banyak crash.'); process.exit(1); }
+      if (count > 10 && !IS_DEV) { err(); process.exit(1); }
     }
   } catch {}
 }
 
-async function boot({ botToken }) {
-  log('🚀', 'Booting...');
+// ==========================================
+// [INI DIA FUNGSI UTAMA YANG DIPANGGIL OLEH LILY-HEALTH.JS]
+// ==========================================
+async function start() {
+  log();
   try {
     checkKillLoop();
     antiDebug();
     if (!antiHook()) hardKill('boot-antiHook');
     installSignalGuard();
     installExitLockdown();
-    if (!loadManifest()) { const m = buildManifest(); m.__env = getEnvFingerprint(); saveManifest(m); log('📦', 'Baseline integrity dibuat.'); }
+    if (!loadManifest()) { const m = buildManifest(); m.__env = getEnvFingerprint(); saveManifest(m); log(); }
     checkEnvBinding();
     if (!verifyIntegrity(false)) { const m = buildManifest(); m.__env = loadManifest()?.__env || getEnvFingerprint(); saveManifest(m); }
     antiInject(); antiLinkLeak();
     
-    if (botToken) await validateTokenOrDie(botToken);
+    const config = require(path.join(process.cwd(), 'config.js'));
+    if (config.BOT_TOKEN) await validateTokenOrDie(config.BOT_TOKEN);
     
     startWatchers();
     STATE.booted = true; STATE.lastStep = 'booted';
-    log('✅', 'Proteksi aktif.');
-    return true;
+    log();
+    
+    require(path.join(process.cwd(), 'index.js'));
+    log();
   } catch (e) {
-    err(`Boot error step "${STATE.lastStep}"`);
+    err();
     throw e;
   }
 }
 
-module.exports = { boot, hardKill, sha256 };
+module.exports = { start, hardKill, sha256 };
