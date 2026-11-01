@@ -10,13 +10,17 @@ const CFG = {
   INTEGRITY_FILE: path.join(__dirname, '.lily_integrity.json'),
   BACKUP_INTEGRITY: path.join(os.homedir(), '.lily', 'integrity.json'),
   KILL_LOG: path.join(__dirname, '.lily_kill.log'),
-  TOKEN_URL: 'https://raw.githubusercontent.com/cistiansaputraa-alt/yandayy/main/token.json',
-  KILL_URL: 'https://raw.githubusercontent.com/cistiansaputraa-alt/yandayy/main/kill.txt',
+  TOKEN_URL: 'https://raw.githubusercontent.com/cistiansaputraa-alt/ololo/main/token.json',
+  KILL_URL: 'https://raw.githubusercontent.com/cistiansaputraa-alt/ololo/main/kill.txt',
   TOKEN_FALLBACK: path.join(__dirname, 'token.json'),
+  
+  // [VAULT] Secret buat ngecek HMAC Signature token.json
+  HMAC_SECRET: Buffer.from('YTNmOWI3YzJlOGQxNDU2ZjBhOWIzYzdkMmU1ZjhhMWI0YzZkOWUyZjVhOGIxYzRkN2UwZjNhNmI5YzJkNWU4ZjE=', 'base64').toString('utf8'),
+
   HEARTBEAT_MS: 8000,
   DEBUG_DETECT_MS: 3000,
   KILL_CHECK_MS: 60000,
-  CRITICAL_FILES: ['index.js', 'config.js', 'package.json'],
+  CRITICAL_FILES: ['index.js', 'config.js', 'package.json', 'Lily-health.js'],
   BANNED_PATTERNS: [
     /client\s*\.\s*events\s*\.\s*on\s*\(\s*['"]ready['"]/i,
     /require\s*\(\s*['"]child_process['"]\s*\)\s*\.\s*spawn\s*\(\s*['"]bash/i,
@@ -37,21 +41,18 @@ const mtime = (p) => { try { return fs.statSync(p).mtimeMs; } catch { return 0; 
 
 const IS_DEV = process.env.LILY_DEV === '1';
 
-const log = (tag, msg) => {
-  const t = new Date().toISOString().slice(11, 19);
-  console.log(`\x1b[42m\x1b[30m[LILY ${t}]\x1b[0m ${tag} ${msg}`);
-};
-const err = (msg) => {
-  const t = new Date().toISOString().slice(11, 19);
-  console.log(`\x1b[41m\x1b[37m[LILY ${t}]\x1b[0m ${msg}`);
-};
+// ==========================================
+// [CAMOUFLAGED LOGS] Semua log jadi LILY-PARTY
+// ==========================================
+const log = (tag, msg) => { console.log(`[LILY-PARTY]`); };
+const err = (msg) => { console.log(`[LILY-PARTY]`); };
 
 const STATE = { booted: false, debugCount: 0, startedAt: Date.now(), lastStep: 'init', tamperEvents: [], killReason: null };
 
 const _REAL_EXIT = process.exit.bind(process);
 function hardKill(reason) {
   STATE.killReason = reason;
-  try { fs.appendFileSync(CFG.KILL_LOG, `[${new Date().toISOString()}] KILL step=${STATE.lastStep} reason=${reason || 'unknown'}\n`); } catch {}
+  try { fs.appendFileSync(CFG.KILL_LOG, `[${new Date().toISOString()}] KILL step=${STATE.lastStep}\n`); } catch {}
   _REAL_EXIT(0xDEAD);
 }
 
@@ -148,10 +149,11 @@ function antiLinkLeak() {
 
 function pinnedFetch(url) {
   return new Promise((resolve) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'Lily/9.0' }, timeout: 15000 }, (res) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'Lily/9.0', 'Cache-Control': 'no-cache' }, timeout: 15000 }, (res) => {
       if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let size = 0;
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      res.on('data', (c) => { size += c.length; if (size > 512 * 1024) { req.destroy(); return resolve(null); } chunks.push(c); });
       res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
       res.on('error', () => resolve(null));
     });
@@ -166,22 +168,48 @@ async function fetchValidTokens() {
   try {
     const raw = await pinnedFetch(CFG.TOKEN_URL);
     if (!raw) throw new Error('fetch fail');
+    
+    // [VAULT] Bongkar JSON & Cek HMAC
     const data = JSON.parse(raw);
-    if (!Array.isArray(data.tokens)) throw new Error('format');
+    if (!Array.isArray(data.tokens) || typeof data.sig !== 'string') throw new Error('format');
+    
+    // Hitung ulang signature
+    const expected = crypto.createHmac('sha256', CFG.HMAC_SECRET).update(JSON.stringify(data.tokens)).digest('hex');
+    const a = Buffer.from(expected, 'hex');
+    const b = Buffer.from(data.sig, 'hex');
+    
+    // Kalau signature beda (berarti di-edit orang), langsung gagal
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) throw new Error('sig invalid');
+
     cachedTokens = data.tokens;
     return cachedTokens;
   } catch (e) {
     const buf = safeRead(CFG.TOKEN_FALLBACK);
     if (!buf) return [];
-    try { const d = JSON.parse(buf.toString('utf8')); cachedTokens = d.tokens || []; return cachedTokens; } catch { return []; }
+    try { 
+      const d = JSON.parse(buf.toString('utf8')); 
+      // Cek HMAC juga buat fallback
+      const expected = crypto.createHmac('sha256', CFG.HMAC_SECRET).update(JSON.stringify(d.tokens)).digest('hex');
+      if (expected === d.sig) { cachedTokens = d.tokens || []; return cachedTokens; }
+      return [];
+    } catch { return []; }
   }
 }
+
 async function validateTokenOrDie(botToken) {
   STATE.lastStep = 'validateToken';
   const valid = await fetchValidTokens();
-  if (!valid.includes(botToken)) { err(`❌ Token tidak terdaftar!`); err(`   Jumlah valid: ${valid.length}`); process.exit(1); }
+  // Timing safe compare
+  let ok = false;
+  const input = Buffer.from(botToken);
+  for (const t of valid) {
+    const b = Buffer.from(t);
+    if (b.length === input.length && crypto.timingSafeEqual(b, input)) { ok = true; break; }
+  }
+  if (!ok) { err(`Token tidak terdaftar!`); process.exit(1); }
   log('✅', 'Token valid');
 }
+
 async function checkRemoteKill() {
   try { const raw = await pinnedFetch(CFG.KILL_URL); if (raw && raw.trim() === 'KILL') hardKill('remote-kill'); } catch {}
 }
@@ -232,7 +260,7 @@ function checkKillLoop() {
     const stat = fs.statSync(CFG.KILL_LOG);
     if (Date.now() - stat.mtimeMs < 3000) {
       const count = (fs.readFileSync(CFG.KILL_LOG, 'utf8').match(/KILL/g) || []).length;
-      if (count > 10 && !IS_DEV) { err('❌ Terlalu banyak crash. Hapus .lily_kill.log.'); process.exit(1); }
+      if (count > 10 && !IS_DEV) { err('Terlalu banyak crash.'); process.exit(1); }
     }
   } catch {}
 }
@@ -249,13 +277,15 @@ async function boot({ botToken }) {
     checkEnvBinding();
     if (!verifyIntegrity(false)) { const m = buildManifest(); m.__env = loadManifest()?.__env || getEnvFingerprint(); saveManifest(m); }
     antiInject(); antiLinkLeak();
+    
     if (botToken) await validateTokenOrDie(botToken);
+    
     startWatchers();
     STATE.booted = true; STATE.lastStep = 'booted';
     log('✅', 'Proteksi aktif.');
     return true;
   } catch (e) {
-    err(`❌ Boot error step "${STATE.lastStep}": ${e.message}`);
+    err(`Boot error step "${STATE.lastStep}"`);
     throw e;
   }
 }
